@@ -1,4 +1,4 @@
-package com.ozindoye.fx_alert_engine;
+package com.ozindoye.fx_alert_engine.scheduler;
 
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
