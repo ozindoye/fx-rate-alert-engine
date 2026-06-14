@@ -44,7 +44,7 @@
 - `ddl-auto=create` drops and recreates tables on restart — data loss risk
 - Manual SQL lets us use MySQL-specific features (ENUM, custom indexes)
 - Mirrors real practice — schema changes go through migration scripts (Flyway/Liquibase)
-- We will use `ddl-auto=validate` in Spring Boot — it checks models match the DB but never touches tables
+- We use `ddl-auto=validate` in Spring Boot — it checks models match the DB but never touches tables
 
 ### Table: `currency_pairs`
 | Decision | Choice | Why |
@@ -58,6 +58,7 @@
 | Write strategy | Append-only (INSERT only, never UPDATE) | Full audit trail; mirrors how real trading systems work; auditability and debugging |
 | `rate` type | `DECIMAL(18,6)` | Never use FLOAT or DOUBLE for monetary values — precision loss |
 | `pair_id` | Foreign key to `currency_pairs` | Database rejects any rate row that references a non-existent pair |
+| `fetched_at` | `updatable = false` | Fetch timestamps should never be changed once written |
 
 ### Table: `alert_subscriptions`
 | Decision | Choice | Why |
@@ -75,4 +76,70 @@ Reason: Floating point cannot represent 0.1 exactly in binary. For exchange rate
 
 ---
 
-*Last updated: Step 2 — Schema created and verified in MySQL Workbench*
+## Configuration
+
+### Profile strategy
+- `application.properties` — committed to GitHub; no secrets
+- `application-local.properties` — gitignored; contains real DB password
+- `spring.profiles.active=local` merges both files on startup
+- `*-local.properties` in `.gitignore` prevents accidental commits
+- Mirrors professional practice before graduating to AWS Secrets Manager or Vault
+
+### JPA settings
+| Setting | Value | Why |
+|---------|-------|-----|
+| `ddl-auto` | `validate` | Spring checks models match DB but never touches tables |
+| `show-sql` | `true` | Every SQL query printed to console for debugging |
+| `format_sql` | `true` | Makes printed SQL readable |
+
+---
+
+## Code Architecture
+
+### Package structure
+```
+com.ozindoye.fx_alert_engine
+├── model        — CurrencyPair, RateHistory
+├── repository   — CurrencyPairRepository, RateHistoryRepository
+└── scheduler    — FxRatePoller, FxRateClient
+```
+Chosen over flat structure for clean separation of concerns and professional readability.
+
+### Class responsibilities
+| Class | Responsibility |
+|-------|---------------|
+| `FxRatePoller` | Owns the @Scheduled timer; orchestrates the poll cycle |
+| `FxRateClient` | Owns the HTTP call to the Frankfurter API; returns BigDecimal |
+| `CurrencyPair` | JPA entity mapping to `currency_pairs` table |
+| `RateHistory` | JPA entity mapping to `rate_history` table |
+| `CurrencyPairRepository` | DB access for currency pairs; findByBaseAndQuote method |
+| `RateHistoryRepository` | DB access for rate history; save method |
+
+### Why constructor injection over `new`
+Creating dependencies with `new` inside a class tightly couples them and makes testing hard. Constructor injection lets Spring manage instances. You can swap implementations without touching dependent classes.
+
+### Why `orElseGet` for currency pair lookup
+`findByBaseAndQuote` returns an `Optional`. `orElseGet` runs a fallback block only if nothing was found. First poll creates the USD/GBP row. Every subsequent poll reuses it. Prevents duplicate `currency_pairs` rows.
+
+### External API: Frankfurter
+- URL: `https://api.frankfurter.app/latest?from={base}&to={quote}`
+- Free, no API key required
+- Returns JSON parsed into a Java Map; rate extracted and converted to BigDecimal
+
+---
+
+## GitHub
+- Repository: https://github.com/ozindoye/fx-rate-alert-engine
+- Visibility: Public
+
+### Commit convention
+| Prefix | When to use |
+|--------|-------------|
+| `chore:` | Setup, config, tooling |
+| `config:` | Application configuration changes |
+| `feat:` | New features |
+| `fix:` | Bug fixes |
+
+---
+
+*Last updated: Day 1 complete — first rate fetched and saved to DB, verified in MySQL Workbench*
