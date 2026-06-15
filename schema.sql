@@ -27,3 +27,14 @@ CREATE TABLE alert_subscriptions (
                                      active           BOOLEAN        NOT NULL DEFAULT TRUE,
                                      CONSTRAINT fk_alert_pair FOREIGN KEY (pair_id) REFERENCES currency_pairs(id)
 );
+
+CREATE TABLE delivery_log (
+                              id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+                              subscription_id     BIGINT NOT NULL,
+                              rate                DECIMAL(18,6) NOT NULL,
+                              status              ENUM('SUCCESS', 'FAILED') NOT NULL,
+                              error_message       VARCHAR(500),
+                              delivered_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                              CONSTRAINT fk_delivery_subscription
+                                  FOREIGN KEY (subscription_id) REFERENCES alert_subscriptions(id)
+);
