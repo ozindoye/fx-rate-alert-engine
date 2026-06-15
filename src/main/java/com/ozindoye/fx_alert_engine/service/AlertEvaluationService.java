@@ -13,11 +13,14 @@ public class AlertEvaluationService {
 
     private final AlertSubscriptionRepository alertSubscriptionRepository;
     private final WebhookDeliveryService webhookDeliveryService;
+    private final EmailDeliveryService emailDeliveryService;
 
     public AlertEvaluationService(AlertSubscriptionRepository alertSubscriptionRepository,
-                                  WebhookDeliveryService webhookDeliveryService) {
+                                  WebhookDeliveryService webhookDeliveryService,
+                                  EmailDeliveryService emailDeliveryService) {
         this.alertSubscriptionRepository = alertSubscriptionRepository;
         this.webhookDeliveryService = webhookDeliveryService;
+        this.emailDeliveryService = emailDeliveryService;
     }
 
     public void evaluate(CurrencyPair pair, BigDecimal rate) {
@@ -32,6 +35,8 @@ public class AlertEvaluationService {
                 System.out.println("Alert triggered for " + subscription.getUserEmail()
                         + " — rate: " + rate
                         + " threshold: " + subscription.getThresholdValue());
+
+                emailDeliveryService.sendAlert(subscription, rate, pairLabel);
 
                 if (subscription.getWebhookUrl() != null) {
                     webhookDeliveryService.deliver(subscription, rate, pairLabel);
