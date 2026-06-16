@@ -1,145 +1,213 @@
-# FX Rate Alert Engine — Decision Log
-
-## Environment & Tooling
-
-| Decision | Choice | Why |
-|----------|--------|-----|
-| **IDE** | IntelliJ | Built for Java/Spring; industry standard in fintech; better Spring support than VS Code |
-| **Java version** | Java 17 (Temurin) | LTS version; widely used in production fintech teams |
-| **Spring Boot version** | 3.5.14 | Latest stable non-snapshot 3.x release; 4.x too new for a portfolio project |
-| **Build tool** | Maven | Standard for enterprise Java; most fintech shops use it |
-| **Database** | MySQL (local, MySQL80) | Relational; appropriate for structured financial data |
-| **Database GUI** | MySQL Workbench | Visual tool to inspect tables and run queries during development |
+# FX Rate Alert Engine — My Decision Log
 
 ---
 
-## Project Setup
+## Why I Built This
 
-| Decision | Choice | Why |
-|----------|--------|-----|
-| **Packaging** | Jar | Standard for Spring Boot; runs with embedded Tomcat |
-| **Group ID** | `com.ozindoye` | Reverse domain convention for Java packages |
-| **Artifact** | `fx-alert-engine` | Becomes the folder name and JAR name |
+I wanted a portfolio project that would signal to fintech engineers that I understand how financial systems work. The specific details — using BigDecimal instead of double, writing SQL manually, append-only history, exponential backoff on retries — are the kind of things senior engineers notice and ask about.
 
 ---
 
-## Dependencies
+## Tools & Setup
 
-| Dependency | Why |
-|------------|-----|
-| **Spring Web** | REST endpoints + embedded Tomcat server |
-| **Spring Data JPA** | Database access without raw SQL boilerplate |
-| **MySQL Driver** | JDBC driver so Java can talk to MySQL |
-| **Validation** | `@NotNull`, `@Email` annotations on models |
-| **Scheduler** | Built into Spring Boot core — no extra dependency needed |
+I used **IntelliJ** because it's the industry standard for Java/Spring work and I already had experience with it. VS Code can do Spring Boot but it's noticeably less smooth.
+
+I went with **Java 17** because it's what I had installed and it's an LTS version still widely used in production fintech teams. Java 21 is growing but 17 is completely fine for this project.
+
+**Spring Boot 3.5.14** — I picked this because it's the latest stable release in the 3.x line. I avoided snapshots (unfinished) and 4.x (too new, too many rough edges for a portfolio project).
+
+**Maven** over Gradle — standard for enterprise Java. Most fintech shops use it.
+
+**MySQL** locally with **MySQL Workbench** to visually inspect tables during development.
 
 ---
 
-## Database Schema
+## Project Scaffolding
+
+- Group ID: `com.ozindoye` — reverse domain convention for Java packages
+- Artifact: `fx-alert-engine`
+- Packaging: Jar — standard for Spring Boot, runs with embedded Tomcat
+
+Dependencies I added:
+- **Spring Web** — for REST endpoints and the embedded Tomcat server
+- **Spring Data JPA** — handles database access without writing raw SQL boilerplate
+- **MySQL Driver** — JDBC driver so Java can actually talk to MySQL
+- **Validation** — for `@NotNull`, `@Email` etc. on request objects
+- Scheduling is built into Spring Boot core — no extra dependency needed for `@Scheduled`
+
+Later added:
+- **spring-retry** + **spring-aspects** — for `@Retryable` exponential backoff on webhook delivery. spring-aspects is required because @Retryable uses AOP under the hood
+- **sendgrid-java 4.10.1** — SendGrid SDK for sending real emails
+
+---
+
+## Database Decisions
+
+### Why I wrote the SQL myself instead of letting Spring generate the tables
+
+I made a deliberate choice to write the schema in SQL and use `ddl-auto=validate` rather than letting Hibernate auto-generate the tables. A few reasons:
+
+- In real teams, the application doesn't own the schema. DBAs and senior engineers control it.
+- `ddl-auto=create` drops and recreates tables on every restart — instant data loss
+- Writing SQL myself means I can use MySQL-specific features like ENUM and custom indexes
+- It mirrors how real schema changes work in production — through migration scripts (Flyway, Liquibase)
+- `ddl-auto=validate` means Spring checks my Java models match the DB on startup but never touches the tables themselves
 
 ### Database name: `fx_alert_db`
 
-### Why we wrote SQL manually instead of letting Spring Boot generate tables
-- In professional teams, the application does not own the schema
-- `ddl-auto=create` drops and recreates tables on restart — data loss risk
-- Manual SQL lets us use MySQL-specific features (ENUM, custom indexes)
-- Mirrors real practice — schema changes go through migration scripts (Flyway/Liquibase)
-- We use `ddl-auto=validate` in Spring Boot — it checks models match the DB but never touches tables
-
 ### Table: `currency_pairs`
-| Decision | Choice | Why |
-|----------|--------|-----|
-| `base` / `quote` type | `VARCHAR(3)` | Currency codes are always exactly 3 characters (USD, GBP, EUR) |
-| Unique constraint | `UNIQUE KEY uq_base_quote (base, quote)` | Database enforces no duplicate pairs — not just application code |
+Stores the pairs I'm watching (e.g. USD/GBP). Everything else points back here.
+
+- `base` and `quote` are `VARCHAR(3)` — currency codes are always exactly 3 characters
+- Added a `UNIQUE KEY` on `(base, quote)` so the database itself prevents duplicates, not just my application code
 
 ### Table: `rate_history`
-| Decision | Choice | Why |
-|----------|--------|-----|
-| Write strategy | Append-only (INSERT only, never UPDATE) | Full audit trail; mirrors how real trading systems work; auditability and debugging |
-| `rate` type | `DECIMAL(18,6)` | Never use FLOAT or DOUBLE for monetary values — precision loss |
-| `pair_id` | Foreign key to `currency_pairs` | Database rejects any rate row that references a non-existent pair |
-| `fetched_at` | `updatable = false` | Fetch timestamps should never be changed once written |
+This is append-only — I only ever INSERT, never UPDATE. Every poll creates a new row.
+
+- Doing it this way gives a full audit trail of every rate I've ever seen
+- `rate` is `DECIMAL(18,6)` — I never use FLOAT or DOUBLE for financial values because floating point can't represent 0.1 exactly in binary. That's a bug waiting to happen.
+- `fetched_at` has `updatable = false` — once written, a timestamp should never change
 
 ### Table: `alert_subscriptions`
-| Decision | Choice | Why |
-|----------|--------|-----|
-| `threshold_type` | `ENUM('ABOVE', 'BELOW')` | Only two valid values; database enforces this — no application bug can insert a typo |
-| `webhook_url` | Nullable | Not all users have a system to receive webhooks; some only need email — supports both use cases in one table |
-| `active` | `BOOLEAN DEFAULT TRUE` | Allows pausing an alert without deleting it — preserves history |
+What a user wants to be alerted about.
+
+- `threshold_type` is `ENUM('ABOVE', 'BELOW')` — only two valid values ever exist, so I let the database enforce that
+- `webhook_url` is nullable — not every user has a system to receive webhooks. Some just want an email. Making it optional supports both in one table.
+- `active` defaults to `TRUE` — lets me pause a subscription without deleting it
+
+### Table: `delivery_log`
+Added this as an audit trail for every alert delivery attempt.
+
+- Every time an alert fires, I write a row here with the outcome (SUCCESS or FAILED) and the error message if it failed
+- `rate` column records exactly what rate triggered the alert — important for debugging
+- `error_message` is nullable — only populated on failure
+- This mirrors how real financial systems think about auditability
 
 ---
 
 ## Numeric Precision Rule
-**Always use `BigDecimal` in Java. Always use `DECIMAL(18,6)` in MySQL. Never use `double`, `float`, `FLOAT`, or `DOUBLE` for any monetary or rate value.**
 
-Reason: Floating point cannot represent 0.1 exactly in binary. For exchange rates and money, that is a bug.
+**BigDecimal in Java. DECIMAL(18,6) in MySQL. Never double, float, FLOAT, or DOUBLE for any rate or monetary value.**
 
----
-
-## Configuration
-
-### Profile strategy
-- `application.properties` — committed to GitHub; no secrets
-- `application-local.properties` — gitignored; contains real DB password
-- `spring.profiles.active=local` merges both files on startup
-- `*-local.properties` in `.gitignore` prevents accidental commits
-- Mirrors professional practice before graduating to AWS Secrets Manager or Vault
-
-### JPA settings
-| Setting | Value | Why |
-|---------|-------|-----|
-| `ddl-auto` | `validate` | Spring checks models match DB but never touches tables |
-| `show-sql` | `true` | Every SQL query printed to console for debugging |
-| `format_sql` | `true` | Makes printed SQL readable |
+Floating point can't represent 0.1 exactly in binary. In a financial context that's not an edge case — it's a guaranteed bug.
 
 ---
 
-## Code Architecture
+## Configuration: Secrets Management
+
+I split my config into two files:
+
+- `application.properties` — committed to GitHub, contains no secrets, just structure and placeholders
+- `application-local.properties` — gitignored, contains my real DB password and SendGrid API key
+- `spring.profiles.active=local` tells Spring to merge both files on startup
+- Added `*-local.properties` to `.gitignore` so it can never accidentally be committed
+
+This mirrors how real teams handle secrets before graduating to something like AWS Secrets Manager or HashiCorp Vault.
+
+---
+
+## Code Architecture Decisions
 
 ### Package structure
+
+I organised into sub-packages rather than dumping everything in one place:
+
 ```
 com.ozindoye.fx_alert_engine
-├── model        — CurrencyPair, RateHistory
-├── repository   — CurrencyPairRepository, RateHistoryRepository
-└── scheduler    — FxRatePoller, FxRateClient
+├── controller   — HTTP layer
+├── dto          — request/response objects
+├── model        — JPA entities
+├── repository   — database access
+├── scheduler    — polling and API client
+└── service      — business logic
 ```
-Chosen over flat structure for clean separation of concerns and professional readability.
 
-### Class responsibilities
-| Class | Responsibility |
-|-------|---------------|
-| `FxRatePoller` | Owns the @Scheduled timer; orchestrates the poll cycle |
-| `FxRateClient` | Owns the HTTP call to the Frankfurter API; returns BigDecimal |
-| `CurrencyPair` | JPA entity mapping to `currency_pairs` table |
-| `RateHistory` | JPA entity mapping to `rate_history` table |
-| `CurrencyPairRepository` | DB access for currency pairs; findByBaseAndQuote method |
-| `RateHistoryRepository` | DB access for rate history; save method |
+### Two classes for polling: FxRatePoller + FxRateClient
 
-### Why constructor injection over `new`
-Creating dependencies with `new` inside a class tightly couples them and makes testing hard. Constructor injection lets Spring manage instances. You can swap implementations without touching dependent classes.
+I split the polling logic into two classes rather than one. `FxRatePoller` owns the schedule and orchestrates the cycle. `FxRateClient` owns the HTTP call to the Frankfurter API. This is separation of concerns — each class has one job.
 
-### Why `orElseGet` for currency pair lookup
-`findByBaseAndQuote` returns an `Optional`. `orElseGet` runs a fallback block only if nothing was found. First poll creates the USD/GBP row. Every subsequent poll reuses it. Prevents duplicate `currency_pairs` rows.
+### Why I used @Retryable instead of writing my own retry loop
 
-### External API: Frankfurter
-- URL: `https://api.frankfurter.app/latest?from={base}&to={quote}`
-- Free, no API key required
-- Returns JSON parsed into a Java Map; rate extracted and converted to BigDecimal
+I could have written a while loop with Thread.sleep for the exponential backoff, but Spring Retry's `@Retryable` is cleaner, better tested, and shows I know the ecosystem. Configuration:
+- `maxAttempts = 3`
+- `@Backoff(delay = 1000, multiplier = 2)` — waits 1 second, then 2 seconds between retries
+- `@Recover` method handles the failure case after all retries are exhausted
+
+### DTO pattern for REST endpoints
+
+I used separate DTO classes instead of exposing my JPA entities directly over the API:
+
+- `CreateSubscriptionRequest` — what the caller sends in. Has validation annotations (`@Email`, `@NotBlank`, `@NotNull`, `@DecimalMin`)
+- `SubscriptionResponse` — what I send back. Flat structure with plain fields, no Hibernate proxies
+
+Why: decouples my API contract from my database model. If I rename a column, my API doesn't break. Also prevents the Hibernate lazy loading proxy serialisation error.
+
+### FetchType.LAZY and the proxy problem
+
+I use `FetchType.LAZY` on all `@ManyToOne` relationships — it's more efficient because Hibernate doesn't load related objects unless you actually need them.
+
+The catch: once the JPA session closes, you can't access a LAZY proxy anymore. I hit this twice:
+
+1. `WebhookDeliveryService` trying to call `subscription.getCurrencyPair().getBase()` after the session closed
+2. The GET endpoint trying to serialise a LAZY entity directly
+
+Fix in both cases: access the values you need while the session is still open (in the service layer), copy them into plain Strings, and pass those forward. Never pass JPA entities across session boundaries.
+
+### BigDecimal.compareTo() for rate comparison
+
+BigDecimal can't use `>` or `<` operators like primitives can. I use `compareTo()`:
+- Returns positive if left > right → ABOVE condition
+- Returns negative if left < right → BELOW condition
+
+
+### EnumType.STRING for all enums
+
+I always use `@Enumerated(EnumType.STRING)` rather than the default `ORDINAL`. ORDINAL stores 0, 1, 2... which means if I ever reorder the enum values, all existing data silently becomes wrong. STRING stores "ABOVE", "BELOW" — safe regardless of order changes.
+
+---
+
+## Unit Tests
+
+I used JUnit 5 + Mockito to test `AlertEvaluationService` — the most critical class because it contains the decision of whether an alert fires.
+
+Pattern I follow: **AAA — Arrange, Act, Assert**
+
+I mocked the dependencies (repository, webhook service, email service) so the tests run in complete isolation — no real database, no real HTTP calls.
+
+Four tests covering the core logic:
+
+| Test | Scenario | Expected |
+|------|----------|----------|
+| `shouldFireAlert_whenRateIsAboveThreshold` | Rate 0.80, threshold 0.50, ABOVE | Alert fires |
+| `shouldNotFireAlert_whenRateIsBelowThreshold_andTypeIsAbove` | Rate 0.40, threshold 0.50, ABOVE | Alert does not fire |
+| `shouldFireAlert_whenRateIsBelowThreshold` | Rate 0.40, threshold 0.50, BELOW | Alert fires |
+| `shouldNotFireAlert_whenRateIsAboveThreshold_andTypeIsBelow` | Rate 0.80, threshold 0.50, BELOW | Alert does not fire |
+
+All four passing green.
 
 ---
 
 ## GitHub
-- Repository: https://github.com/ozindoye/fx-rate-alert-engine
-- Visibility: Public
 
-### Commit convention
-| Prefix | When to use |
-|--------|-------------|
-| `chore:` | Setup, config, tooling |
-| `config:` | Application configuration changes |
-| `feat:` | New features |
-| `fix:` | Bug fixes |
+Repository: https://github.com/ozindoye/fx-rate-alert-engine
+
+Commit convention I use:
+- `chore:` — setup, config, tooling
+- `config:` — application configuration
+- `feat:` — new features
+- `fix:` — bug fixes
+- `test:` — unit tests
 
 ---
 
-*Last updated: Day 1 complete — first rate fetched and saved to DB, verified in MySQL Workbench*
+## What's Next
+
+### Phase 2 — Learn React on a separate project
+Not bolting a frontend onto this. I'll build a separate full stack project specifically to learn React. This project is a backend API and that's where its value is.
+
+### Phase 3 — Come back and add meaningful AI
+Once I understand React and have some AI basics, I'll return to add something genuinely interesting — anomaly detection on rate history, NLP-based subscription creation, or rate trend analysis. Not a shallow ChatGPT wrapper.
+
+---
+
+*Phase 1 complete.*
